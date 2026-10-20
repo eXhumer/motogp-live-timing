@@ -17,6 +17,8 @@ step with a video. Modelled on
 > 2026 Indonesian GP race. The live client follows the timingpass web app's
 > code but has not been checked against a live session yet.
 
+**This package is unofficial and is not associated in any way with MotoGP Sports Entertainment Group (formerly Dorna Sports) or the FIM. MotoGP, Moto2, Moto3 and related marks are trade marks of their owners.**
+
 ## Requirements
 
 - Node.js ≥ 22.19.0
