@@ -171,6 +171,12 @@ change, several times a second (`clock`, `sessionTime`, `trackProgress`,
 `lap`, `sector`, `weather` and so on). The client never asks for snapshots:
 the server answers each request with another `refresh` and full snapshot.
 
+At the chequered flag `sessionStatus.s` goes from `S` to `C`, then to `F` once
+the results are final, a few minutes later. The connection stays open between
+sessions: when the next one is set up, the server sends `refresh` and a full
+snapshot of it (status `N`), which replaces the state. Race control notices
+(crashes, cancelled lap times) arrive in `flashMessage`.
+
 ### Merging
 
 Each topic update is a row or an array of rows, merged with the rules of the
@@ -220,8 +226,8 @@ These work exactly as in f1-live-timing: `advanceTo(utc)`, `seek(utc)`,
 
 ## Not yet known
 
-- How the live feed behaves over a whole session: between sessions, at the
-  chequered flag, and across a server-side reconnect.
+- How the live feed behaves across a server-side reconnect, and whether
+  `sessionStatus` passes through `R` or `I` (red flag) in a session.
 - Whether a refresh token stays valid after it has been used once.
 
 ## License

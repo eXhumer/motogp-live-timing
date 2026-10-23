@@ -43,7 +43,7 @@ export const SessionStatusCode = {
   NotStarted: 'N',
   Started: 'S',
   Running: 'R',
-  /** Seen after the chequered flag of a race, before `F`. Unconfirmed. */
+  /** From the chequered flag (practice and races alike) until the results are final (`F`). */
   Chequered: 'C',
   Finished: 'F',
   Interrupted: 'I',
