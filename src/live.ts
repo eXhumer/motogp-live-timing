@@ -25,6 +25,26 @@ export type SocketFactory = (url: string, options: Partial<ManagerOptions & Sock
 
 export type LiveStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed';
 
+/** What the live server sends in an `error` event before it disconnects a client without a valid token. */
+export const NOT_AUTHORISED = 'NOT_AUTHORISED';
+
+/**
+ * The live server refused the connection (`NOT_AUTHORISED`). Live timing needs
+ * the access token of a MotoGP account with an active Timing Pass;
+ * {@link LiveAuthError.hadToken} tells a rejected token from a missing one.
+ */
+export class LiveAuthError extends Error {
+  override readonly name = 'LiveAuthError';
+
+  constructor(readonly hadToken: boolean) {
+    super(
+      hadToken
+        ? 'The live timing server rejected the token (NOT_AUTHORISED): it has expired or the account has no active Timing Pass.'
+        : 'The live timing server needs a token (NOT_AUTHORISED): pass the access token of a MotoGP account with an active Timing Pass.',
+    );
+  }
+}
+
 export interface LiveClientOptions {
   /** MotoGP account access token (the `DAT` cookie). Asked for again before every reconnect. */
   readonly token?: TokenProvider;
@@ -55,9 +75,11 @@ type EventListener = (event: string, args: readonly unknown[]) => void;
  * track. Every `snapshot` event becomes one {@link TimingMessage}.
  *
  * {@link LiveClient.connect} resolves once the first full snapshot has
- * arrived. The client asks for a full snapshot (`update_data`) on every
- * connect, and again when the server sends `refresh`; if none follows in
- * time it reconnects.
+ * arrived. The server sends one by itself on every connect, after a
+ * `refresh`, as it does for the timingpass web app; when a `refresh` is not
+ * followed by a full snapshot in time, the client reconnects. It never asks
+ * for snapshots itself: the server answers each request with another
+ * `refresh` and full snapshot, so asking on `refresh` would loop.
  */
 export class LiveClient {
   readonly #socket: SocketLike;
@@ -69,6 +91,16 @@ export class LiveClient {
   readonly #queues = new Set<MessageQueue>();
   #status: LiveStatus = 'connecting';
   #closing = false;
+  /** Whether the last handshake sent a token, for {@link LiveAuthError}. */
+  #sentToken = false;
+  #snapshot: TimingMessage | undefined;
+  /**
+   * Messages held back from the snapshot that resolves connect() until the
+   * caller has had its turn: Socket.IO hands over every packet of a network
+   * read at once, and updates read along with the snapshot would otherwise
+   * reach listeners before anyone could subscribe.
+   */
+  #held: TimingMessage[] | undefined;
   #awaitingSnapshot = true;
   #refreshTimer: NodeJS.Timeout | undefined;
   #ready: { resolve: () => void; reject: (error: Error) => void } | undefined;
@@ -82,6 +114,7 @@ export class LiveClient {
   /** Connect and wait for the first full snapshot. */
   static async connect(options: LiveClientOptions = {}): Promise<LiveClient> {
     const token = options.token;
+    let client: LiveClient | undefined;
     const socket = (options.socketFactory ?? createSocket)(options.url ?? LIVE_URL, {
       path: options.path ?? LIVE_PATH,
       autoConnect: false,
@@ -90,14 +123,17 @@ export class LiveClient {
       transports: ['websocket'],
       query: { orgdevice: 'web' },
       extraHeaders: options.headers ?? { origin: TIMINGPASS_URL },
+      // Runs on each handshake, which starts only once connect() has made the client.
       auth: (cb) => {
-        resolveToken(token).then(
-          (value) => cb(value ? { token: value } : {}),
-          () => cb({}),
-        );
+        resolveToken(token)
+          .catch(() => undefined)
+          .then((value) => {
+            client!.#sentToken = Boolean(value);
+            cb(value ? { token: value } : {});
+          });
       },
     });
-    const client = new LiveClient(socket, options);
+    client = new LiveClient(socket, options);
     await client.#start(options.snapshotTimeout ?? 30_000);
     return client;
   }
@@ -105,6 +141,15 @@ export class LiveClient {
   /** Current connection status. */
   get status(): LiveStatus {
     return this.#status;
+  }
+
+  /**
+   * The full snapshot that {@link LiveClient.connect} waited for. It reaches
+   * listeners before `connect` resolves, so one added afterwards misses it:
+   * start a timeline or recording from this.
+   */
+  get snapshot(): TimingMessage {
+    return this.#snapshot!;
   }
 
   /** Call `listener` with every message. Returns an unsubscribe function. */
@@ -140,7 +185,11 @@ export class LiveClient {
     return queue;
   }
 
-  /** Ask the server for a full snapshot. */
+  /**
+   * Ask the server for a full snapshot (`update_data`). It answers with a
+   * `refresh` and a full snapshot of about 150 KB. The client never needs
+   * this; it is here for callers who want a fresh snapshot on demand.
+   */
   requestSnapshot(): void {
     if (this.#socket.connected) this.#socket.emit('update_data');
   }
@@ -157,10 +206,7 @@ export class LiveClient {
     socket.onAny((event, ...args) => {
       for (const listener of [...this.#eventListeners]) listener(event, args);
     });
-    socket.on('connect', () => {
-      this.#setStatus('connected');
-      this.requestSnapshot();
-    });
+    socket.on('connect', () => this.#setStatus('connected'));
     socket.on('disconnect', (reason: string) => {
       if (this.#closing) return;
       this.#setStatus('reconnecting');
@@ -169,6 +215,10 @@ export class LiveClient {
     });
     socket.on('connect_error', (error: Error) => {
       if (!socket.active) this.#fail(error);
+    });
+    // A token the server does not accept: it says so, then disconnects. Retrying would only repeat it.
+    socket.on('error', (reason: unknown) => {
+      if (reason === NOT_AUTHORISED) this.#fail(new LiveAuthError(this.#sentToken));
     });
     socket.io.on('reconnect_failed', () => this.#fail(new Error('Live timing reconnection failed.')));
 
@@ -201,9 +251,10 @@ export class LiveClient {
     if (isFullSnapshot(data) || (this.#awaitingSnapshot && isSnapshotSized(data))) {
       this.#awaitingSnapshot = false;
       this.#clearRefreshTimer();
+      if (this.#ready) this.#snapshot = message;
     } else if (isRefresh(data)) {
+      // The server follows a refresh with a full snapshot by itself.
       this.#awaitingSnapshot = true;
-      this.requestSnapshot();
       this.#clearRefreshTimer();
       // Cleared by the next full snapshot or by close().
       this.#refreshTimer = setTimeout(() => {
@@ -211,8 +262,21 @@ export class LiveClient {
         this.#socket.connect();
       }, this.#refreshTimeout);
     }
-    this.#emit(message);
-    if (!this.#awaitingSnapshot) this.#ready?.resolve();
+    if (this.#held) this.#held.push(message);
+    else this.#emit(message);
+    if (!this.#awaitingSnapshot && this.#ready) {
+      this.#held = [];
+      // After the code awaiting connect() has run (a microtask) and subscribed.
+      setImmediate(() => this.#release());
+      this.#ready.resolve();
+    }
+  }
+
+  #release(): void {
+    const held = this.#held!;
+    this.#held = undefined;
+    if (this.#status === 'closed') return;
+    for (const message of held) this.#emit(message);
   }
 
   /** A `snapshot` payload is the topic map itself, or (defensively) `{ timestamp, data }`. */

@@ -5,6 +5,8 @@ import type { Topic, TopicState } from './topics.js';
 /** Anything that pushes messages to a listener, such as a `LiveClient`. */
 export interface MessageSource {
   subscribeMessages(listener: (message: TimingMessage) => void): () => void;
+  /** The state the source started from (LiveClient's connect-time snapshot), delivered before any listener could subscribe. */
+  readonly snapshot?: TimingMessage;
 }
 
 export interface TimelineOptions {
@@ -44,9 +46,13 @@ export class Timeline {
     this.#interval = options.checkpointInterval ?? DEFAULT_CHECKPOINT_INTERVAL;
   }
 
-  /** Build a timeline that keeps appending messages from a live source. */
+  /**
+   * Build a timeline that keeps appending messages from a live source,
+   * starting from the source's snapshot when it has one.
+   */
   static fromLive(source: MessageSource, options: TimelineOptions = {}): Timeline & Disposable {
     const timeline = new Timeline(options);
+    if (source.snapshot) timeline.insert([source.snapshot]);
     const unsubscribe = source.subscribeMessages((message) => timeline.insert([message]));
     return Object.assign(timeline, { [Symbol.dispose]: unsubscribe });
   }

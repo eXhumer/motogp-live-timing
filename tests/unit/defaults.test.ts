@@ -25,10 +25,12 @@ describe('defaults', () => {
       onAny: vi.fn(),
       disconnect: vi.fn(),
       on: (event: string, listener: (...args: unknown[]) => void) => handlers.set(event, listener),
-      emit: () => handlers.get('snapshot')!(replayLines()[0]!.data),
+      emit: vi.fn(),
+      // Like the real server: the snapshot comes unasked once connected.
       connect() {
         this.connected = true;
         handlers.get('connect')!();
+        handlers.get('snapshot')!(replayLines()[0]!.data);
       },
     };
     io.mockReturnValue(socket);

@@ -14,8 +14,8 @@ step with a video. Modelled on
   [undici](https://github.com/nodejs/undici).
 
 > **Status: early.** Replays and the merge rules are tested against a full
-> 2026 Indonesian GP race. The live client follows the timingpass web app's
-> code but has not been checked against a live session yet.
+> 2026 Indonesian GP race. The live client has been checked against a live
+> session (Moto3 practice at the 2026 Australian GP), but only for minutes.
 
 **This package is unofficial and is not associated in any way with MotoGP Sports Entertainment Group (formerly Dorna Sports) or the FIM. MotoGP, Moto2, Moto3 and related marks are trade marks of their owners.**
 
@@ -94,20 +94,25 @@ cursor.advanceTo(Date.parse('2026-10-11T07:10:00Z'));
 import { LiveClient, Timeline } from '@exhumer/motogp-live-timing';
 
 const live = await LiveClient.connect({ token: () => token });
-const timeline = Timeline.fromLive(live);
+const timeline = Timeline.fromLive(live); // starts from live.snapshot
 
 const cursor = timeline.cursor();
 cursor.follow();
 cursor.subscribe(['sessionStatus', 'flashMessage'], (changed) => {
   for (const topic of changed) console.log(topic, cursor.get(topic));
 });
-
-// Discover events this library does not handle yet.
-live.subscribeEvents((event, args) => console.log(event, args));
 ```
 
 The live server streams whichever session is on track. Read `championship.shn`
 (`MotoGP`, `Moto2`, `Moto3`) and `session.shn` to see which one it is.
+
+Live timing needs a token, like replays. Without one, or with an expired one,
+the server answers `NOT_AUTHORISED` and `connect` rejects with a
+`LiveAuthError` (`hadToken` says which).
+
+`connect` resolves with the first full snapshot, which reaches listeners before
+you can subscribe: read it from `live.snapshot`. `Timeline.fromLive` starts
+from it; a recording should write it first.
 
 ### Record and play back
 
@@ -115,6 +120,7 @@ The live server streams whichever session is on track. Read `championship.shn`
 import { LiveClient, loadRecording, Recorder } from '@exhumer/motogp-live-timing';
 
 const recorder = await Recorder.create('./recordings/australia-race.ndjson');
+recorder.write(live.snapshot);
 live.subscribeMessages((message) => recorder.write(message));
 // ...
 await recorder.close();
@@ -159,6 +165,12 @@ interface TimingMessage {
 Replay lines carry their own timestamps. Live `snapshot` events carry none, so
 they are stamped on arrival.
 
+The live server sends nothing but `snapshot` events. On connect it sends
+`{ refresh: 1 }`, then a full snapshot (about 150 KB), then only the topics that
+change, several times a second (`clock`, `sessionTime`, `trackProgress`,
+`lap`, `sector`, `weather` and so on). The client never asks for snapshots:
+the server answers each request with another `refresh` and full snapshot.
+
 ### Merging
 
 Each topic update is a row or an array of rows, merged with the rules of the
@@ -199,7 +211,8 @@ These work exactly as in f1-live-timing: `advanceTo(utc)`, `seek(utc)`,
 | `rider(rid, season?)` | `RiderProfile`: name, country, and that season's number, team, constructor and pictures. No token needed. `undefined` for an unknown id |
 | `OnDemandEvent`, `OnDemandBroadcast` | Calendar entries: an event's sessions for all three classes, each with a `file_id` |
 | `loadOnDemand(client, fileId)` | Stream a replay into a `Timeline` |
-| `LiveClient.connect(options)` | Live feed; `token`, `url`, `path`, `headers`, `reconnectionAttempts`, `snapshotTimeout`, `refreshTimeout`, `socketFactory` |
+| `LiveClient.connect(options)` | Live feed; `token`, `url`, `path`, `headers`, `reconnectionAttempts`, `snapshotTimeout`, `refreshTimeout`, `socketFactory`. `live.snapshot` is the state it connected with |
+| `LiveAuthError` | The live server refused the token (`NOT_AUTHORISED`); `hadToken` tells a rejected token from a missing one |
 | `Recorder`, `loadRecording` | Write and read NDJSON recordings |
 | `login`, `refreshToken`, `tokenExpiry` | Account sign-in, token refresh and token expiry |
 | `hasTimingPass`, `activePermissions`, `timingPassLicenceId` | Whether the account has an active Timing Pass, its licences, and the pass's current licence id |
@@ -207,9 +220,8 @@ These work exactly as in f1-live-timing: `advanceTo(utc)`, `seek(utc)`,
 
 ## Not yet known
 
-- Which events the live server sends besides `snapshot` and `record`, and
-  whether it sends deltas or full snapshots. Capture a live session (Chrome
-  DevTools, WS frames) to confirm.
+- How the live feed behaves over a whole session: between sessions, at the
+  chequered flag, and across a server-side reconnect.
 - Whether a refresh token stays valid after it has been used once.
 
 ## License

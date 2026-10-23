@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { LIVE_PATH, LIVE_URL, LiveClient, type LiveClientOptions, type SocketLike } from '../../src/live.js';
+import { LIVE_PATH, LIVE_URL, LiveAuthError, LiveClient, type LiveClientOptions, NOT_AUTHORISED, type SocketLike } from '../../src/live.js';
 import { Timeline } from '../../src/timeline.js';
 import { MID_SNAPSHOT_INDEX, replayLines } from '../helpers/fixtures.js';
 
@@ -12,7 +12,10 @@ type Handler = (...args: never[]) => void;
 class FakeSocket implements SocketLike {
   connected = false;
   active = true;
-  /** Answer `update_data` with this full snapshot (or nothing when `null`). */
+  /**
+   * Like lts.motogp.com: send `refresh` and this full snapshot on every
+   * connect, and again for every `update_data` (nothing when `null`).
+   */
   snapshot: unknown = replayLines()[MID_SNAPSHOT_INDEX]!.data;
   readonly emitted: unknown[][] = [];
   readonly handlers = new Map<string, Listener>();
@@ -25,6 +28,7 @@ class FakeSocket implements SocketLike {
   connect = vi.fn(() => {
     this.connected = true;
     this.handlers.get('connect')?.();
+    this.pushSnapshot();
   });
 
   disconnect = vi.fn(() => {
@@ -33,7 +37,16 @@ class FakeSocket implements SocketLike {
 
   emit(event: string, ...args: unknown[]): void {
     this.emitted.push([event, ...args]);
-    if (event === 'update_data' && this.snapshot !== null) queueMicrotask(() => this.send('snapshot', this.snapshot));
+    if (event === 'update_data') this.pushSnapshot();
+  }
+
+  /** What the server sends a client that connects or asks: `refresh`, then the full snapshot. */
+  pushSnapshot(): void {
+    if (this.snapshot === null) return;
+    queueMicrotask(() => {
+      this.send('snapshot', { refresh: 1 });
+      this.send('snapshot', this.snapshot);
+    });
   }
 
   on(event: string, listener: Handler): void {
@@ -79,6 +92,9 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** Lets the client release the updates it held back while connecting. */
+const released = () => new Promise((resolve) => setImmediate(resolve));
+
 describe('LiveClient', () => {
   it('connects like the web app and resolves on the first full snapshot', async () => {
     const { client, socket } = await connect({ token: 'Bearer abc' });
@@ -92,7 +108,8 @@ describe('LiveClient', () => {
       reconnectionAttempts: Infinity,
     });
     expect(await socket.auth()).toEqual({ token: 'abc' });
-    expect(socket.updateRequests()).toBe(1);
+    // The server pushes the snapshot; the client asks for nothing.
+    expect(socket.updateRequests()).toBe(0);
     expect(client.status).toBe('connected');
     await client.close();
     expect(client.status).toBe('closed');
@@ -115,6 +132,7 @@ describe('LiveClient', () => {
 
   it('delivers snapshot events as messages', async () => {
     const { client, socket } = await connect();
+    await released();
     const received: unknown[] = [];
     const events: unknown[] = [];
     client.subscribeMessages((message) => received.push(message));
@@ -138,17 +156,34 @@ describe('LiveClient', () => {
 
   it('feeds a live timeline', async () => {
     const { client, socket } = await connect();
+    await released();
     using timeline = Timeline.fromLive(client);
+    // It starts from the snapshot the client connected with, which no listener could have seen.
+    const snapshot = socket.snapshot as Record<string, unknown>;
+    expect(snapshot['session']).toBeDefined();
+    expect(timeline.latest()['session']).toEqual(snapshot['session']);
     socket.send('snapshot', { sessionStatus: { id: 1, s: 'S' } });
     expect(timeline.latest()['sessionStatus']).toEqual({ id: 1, s: 'S' });
   });
 
-  it('answers refresh with a snapshot request, then reconnects if none comes', async () => {
+  it('waits for the snapshot after a refresh without asking, and does not loop on the answer', async () => {
+    const { client, socket } = await connect();
+    const received: unknown[] = [];
+    client.subscribeMessages((message) => received.push(message));
+    // A caller asks once: the server answers refresh + snapshot, and that is the end of it.
+    client.requestSnapshot();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(socket.updateRequests()).toBe(1);
+    expect(received).toHaveLength(2);
+    await client.close();
+  });
+
+  it('reconnects when a refresh is not followed by a snapshot', async () => {
     vi.useFakeTimers();
     const { client, socket } = await connect({ refreshTimeout: 100 });
     socket.snapshot = null;
     socket.send('snapshot', { refresh: true });
-    expect(socket.updateRequests()).toBe(2);
+    expect(socket.updateRequests()).toBe(0);
     await vi.advanceTimersByTimeAsync(100);
     expect(socket.disconnect).toHaveBeenCalledTimes(1);
     expect(socket.connect).toHaveBeenCalledTimes(2);
@@ -213,6 +248,78 @@ describe('LiveClient', () => {
     socket.ioHandlers.get('reconnect_failed')!();
   });
 
+  it('fails at once when the server refuses the token, saying whether one was sent', async () => {
+    /** The server's side: read the handshake's auth, then refuse it as lts.motogp.com does. */
+    const refuse = (socket: FakeSocket) => {
+      socket.snapshot = null;
+      socket.connect.mockImplementation(() => {
+        void socket.auth().then(() => socket.send('error', NOT_AUTHORISED));
+      });
+    };
+    const missing = connect({}, refuse);
+    await expect(missing).rejects.toBeInstanceOf(LiveAuthError);
+    await expect(missing).rejects.toMatchObject({ hadToken: false, message: expect.stringContaining('needs a token') });
+    await expect(connect({ token: 'expired' }, refuse)).rejects.toMatchObject({
+      hadToken: true,
+      message: expect.stringContaining('rejected the token'),
+    });
+  });
+
+  it('closes with the auth error when a reconnect is refused, and ignores other errors', async () => {
+    const { client, socket } = await connect({ token: 'abc' });
+    const errors: (Error | undefined)[] = [];
+    client.subscribeStatus((_status, error) => errors.push(error));
+    socket.send('error', 'SOMETHING_ELSE');
+    expect(client.status).toBe('connected');
+    await socket.auth();
+    socket.send('error', NOT_AUTHORISED);
+    expect(client.status).toBe('closed');
+    expect(errors.at(-1)).toBeInstanceOf(LiveAuthError);
+  });
+
+  it('holds back updates that arrive with the connect snapshot until the caller can subscribe', async () => {
+    const pending = connect({}, (socket) => {
+      // One network read: the snapshot and three updates, handed over together.
+      socket.pushSnapshot = () =>
+        queueMicrotask(() => {
+          socket.send('snapshot', socket.snapshot);
+          for (const ltm of [1, 2, 3]) socket.send('snapshot', { clock: { id: 1, ltm } });
+        });
+    });
+    const { client } = await pending;
+    const received: unknown[] = [];
+    client.subscribeMessages((message) => received.push(message.data));
+    const iterator = client.messages();
+    await released();
+    expect(received).toEqual([1, 2, 3].map((ltm) => ({ clock: { id: 1, ltm } })));
+    expect((await iterator.next()).value).toEqual({ utc: 42, data: { clock: { id: 1, ltm: 1 } } });
+    await client.close();
+  });
+
+  it('drops held updates when closed before they are released', async () => {
+    const { client } = await connect({}, (socket) => {
+      socket.pushSnapshot = () =>
+        queueMicrotask(() => {
+          socket.send('snapshot', socket.snapshot);
+          socket.send('snapshot', { clock: { id: 1, ltm: 1 } });
+        });
+    });
+    const received: unknown[] = [];
+    client.subscribeMessages((message) => received.push(message));
+    await client.close();
+    await released();
+    expect(received).toEqual([]);
+  });
+
+  it('keeps the snapshot it connected with', async () => {
+    const { client, socket } = await connect();
+    const first = client.snapshot;
+    expect(first).toEqual({ utc: 42, data: socket.snapshot });
+    // A later full snapshot (after a refresh) goes to listeners, not here.
+    socket.send('snapshot', socket.snapshot);
+    expect(client.snapshot).toBe(first);
+  });
+
   it('times out without a full snapshot', async () => {
     vi.useFakeTimers();
     const pending = connect({ snapshotTimeout: 50 }, (socket) => {
@@ -242,8 +349,8 @@ describe('LiveClient', () => {
     expect(await loop.return!()).toEqual({ value: undefined, done: true });
     other.client.requestSnapshot();
     other.socket.connected = false;
-    other.client.requestSnapshot();
-    expect(other.socket.updateRequests()).toBe(2);
+    other.client.requestSnapshot(); // not connected: nothing sent
+    expect(other.socket.updateRequests()).toBe(1);
   });
 
   it('uses socket.io-client by default', async () => {

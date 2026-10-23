@@ -38,7 +38,7 @@ export {
 } from './decode.js';
 export type { OnDemandLine, TimingMessage } from './decode.js';
 
-export { LIVE_PATH, LIVE_URL, LiveClient } from './live.js';
+export { LIVE_PATH, LIVE_URL, LiveAuthError, LiveClient, NOT_AUTHORISED } from './live.js';
 export type { LiveClientOptions, LiveStatus, SocketFactory, SocketLike } from './live.js';
 
 export { applyRows, rowKey } from './merge.js';
