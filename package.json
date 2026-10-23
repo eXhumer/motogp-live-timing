@@ -72,6 +72,7 @@
     "vitest": "^5.0.5"
   },
   "dependencies": {
+    "@exhumer/motogp-auth": "^0.1.0",
     "socket.io-client": "^4.8.4",
     "undici": "^8.12.2"
   },

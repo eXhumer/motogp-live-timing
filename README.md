@@ -177,6 +177,17 @@ sessions: when the next one is set up, the server sends `refresh` and a full
 snapshot of it (status `N`), which replaces the state. Race control notices
 (crashes, cancelled lap times) arrive in `flashMessage`.
 
+A red flag arrives as deltas, without a snapshot. `marshallingTrackState` turns
+`red`, then `sessionStatus.s` turns `I` about 300 ms later, and `sessionTime`
+stops. Lap times set while the flag is out are cancelled in `flashMessage`. At
+the restart the track state goes back to `none` and the status goes to `R`, not
+`S`. `R` lasts until the chequered flag, so a red-flagged session ends
+`R → C → F` (about five minutes from `C` to `F`).
+
+The server streams to one connection per token. A second connection with the
+same token gets its first snapshot and then nothing more until the first one
+disconnects. It then gets a `refresh` and a new full snapshot.
+
 ### Merging
 
 Each topic update is a row or an array of rows, merged with the rules of the
@@ -226,8 +237,9 @@ These work exactly as in f1-live-timing: `advanceTo(utc)`, `seek(utc)`,
 
 ## Not yet known
 
-- How the live feed behaves across a server-side reconnect, and whether
-  `sessionStatus` passes through `R` or `I` (red flag) in a session.
+- How the live feed behaves across a server-side reconnect.
+- Whether `R` also appears without a red flag, and which `marshallingTrackState`
+  values exist besides `none` and `red`.
 - Whether a refresh token stays valid after it has been used once.
 
 ## License

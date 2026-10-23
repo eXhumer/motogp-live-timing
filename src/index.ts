@@ -11,15 +11,20 @@ export {
   refreshToken,
   TIMING_PASS_LICENCE_ID,
   timingPassLicenceId,
+  tokenClaims,
   tokenExpiry,
+  MotoGPAuth,
+  NotSignedInError,
 } from './auth.js';
 export type {
   LicenceIdOptions,
   LoginOptions,
+  MotoGPAuthOptions,
   Permission,
   PermissionsOptions,
   RefreshTokenOptions,
   TimingPassOptions,
+  TokenClaims,
   TokenResponse,
 } from './auth.js';
 

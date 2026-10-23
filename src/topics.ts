@@ -42,10 +42,12 @@ export const ID_KEYED_TOPICS = [
 export const SessionStatusCode = {
   NotStarted: 'N',
   Started: 'S',
+  /** After a restart from a red flag (`I`); the session never goes back to `S`. */
   Running: 'R',
   /** From the chequered flag (practice and races alike) until the results are final (`F`). */
   Chequered: 'C',
   Finished: 'F',
+  /** Red flag. `sessionTime` stops until the restart (`R`). */
   Interrupted: 'I',
 } as const;
 export type SessionStatusCode = (typeof SessionStatusCode)[keyof typeof SessionStatusCode] | (string & {});
@@ -367,6 +369,14 @@ export interface BoxInfo {
   lppt: number;
 }
 
+/** Track-wide flag, one row. Turns `red` slightly before `sessionStatus` turns `I`. */
+export interface MarshallingTrackState {
+  /** `none` or `red`; other values not seen yet. */
+  stt: string;
+  /** ISO time of the last state change; `null` before the first. */
+  sca: string | null;
+}
+
 export interface MarshallingSector {
   num: number;
   /** Track sectors this marshal post covers. */
@@ -428,6 +438,8 @@ export interface TopicStates {
   runSummary: Record<string, Record<string, Row>>;
   /** Marshal posts by track sector (`atns`), then post number. */
   marshallingSectorState: Record<string, Record<string, MarshallingSector>>;
+  /** A single row: its rows carry no `rid`, so each one replaces the last. */
+  marshallingTrackState: MarshallingTrackState[];
 
   record: TimingRecord[];
   racer: Racer[];
